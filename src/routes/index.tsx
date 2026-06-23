@@ -505,8 +505,9 @@ function Index() {
         <div className="space-y-8 text-center">
           <h2 className="text-3xl font-display italic">Para a nossa casa</h2>
           <p className="text-lg leading-relaxed text-pretty text-muted-foreground">
-            Este é o nosso enxoval — um registro vivo do que já reunimos e do que ainda está na nossa
-            lista para comprar. Cada cômodo tem sua própria lista; toque no rótulo para alternar entre
+            Cada escolha aqui representa um pedacinho do lar que estamos construindo juntos.
+  Entre itens que já conquistamos e outros que ainda virão, seguimos organizando
+  com carinho tudo o que fará parte da nossa casa.
             <em> Temos</em> e <em>Comprar</em>, ou edite e adicione novos itens à vontade.
           </p>
           <p className="text-sm tracking-wide uppercase font-medium pt-4">Com amor, Maju &amp; Pedro</p>
