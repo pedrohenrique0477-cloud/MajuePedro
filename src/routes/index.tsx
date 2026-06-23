@@ -1,5 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
+import { supabase } from "@/lib/supabase";
 import heroImg from "@/assets/hero-linen.jpg";
 import cozinhaImg from "@/assets/room-cozinha.jpg";
 import salaImg from "@/assets/room-sala.jpg";
@@ -35,6 +36,13 @@ type Room = {
   subtitle: string;
   image: string;
   items: Item[];
+};
+type SupabaseItem = {
+  id: string;
+  room_id: string;
+  name: string;
+  note?: string | null;
+  status: Status;
 };
 
 const INITIAL_ROOMS: Room[] = [
@@ -167,7 +175,6 @@ const INITIAL_ROOMS: Room[] = [
 ];
 
 
-const STORAGE_KEY = "maju-pedro-enxoval-v4";
 
 type Filter = "todos" | "temos" | "comprar";
 
@@ -189,32 +196,93 @@ function Index() {
   const [newName, setNewName] = useState("");
   const [newStatus, setNewStatus] = useState<Status>("comprar");
   const [newNote, setNewNote] = useState("");
+    function aplicarItensNosComodos(rows: SupabaseItem[]) {
+    const roomsAtualizados = INITIAL_ROOMS.map((room) => {
+      const itensDoComodo = rows
+        .filter((row) => row.room_id === room.id)
+        .map((row) => ({
+          id: row.id,
+          name: row.name,
+          note: row.note ?? undefined,
+          status: row.status,
+        }));
+
+      return {
+        ...room,
+        items: itensDoComodo,
+      };
+    });
+
+    setRooms(roomsAtualizados);
+  }
+
+  async function carregarItensOnline() {
+    const { data, error } = await supabase
+      .from("enxoval_items")
+      .select("id, room_id, name, note, status")
+      .order("created_at", { ascending: true });
+
+    if (error) {
+      console.error("Erro ao carregar itens do Supabase:", error);
+      alert("Não foi possível carregar os itens online.");
+      return;
+    }
+
+    if (!data || data.length === 0) {
+      await criarItensIniciaisOnline();
+      return;
+    }
+
+    aplicarItensNosComodos(data as SupabaseItem[]);
+  }
+
+  async function criarItensIniciaisOnline() {
+    const itensIniciais = INITIAL_ROOMS.flatMap((room) =>
+      room.items.map((item) => ({
+        id: item.id,
+        room_id: room.id,
+        name: item.name,
+        note: item.note ?? null,
+        status: item.status,
+      }))
+    );
+
+    const { error } = await supabase
+      .from("enxoval_items")
+      .upsert(itensIniciais, { onConflict: "id" });
+
+    if (error) {
+      console.error("Erro ao criar itens iniciais:", error);
+      alert("Não foi possível criar os itens iniciais online.");
+      return;
+    }
+
+    await carregarItensOnline();
+  }
 
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        const saved = JSON.parse(raw) as Room[];
-        if (Array.isArray(saved) && saved.length) {
-          // re-attach images from initial (don't persist binary refs)
-          setRooms(
-            saved.map((r) => ({
-              ...r,
-              image: INITIAL_ROOMS.find((i) => i.id === r.id)?.image ?? r.image,
-            })),
-          );
-        }
-      }
-    } catch {}
+    carregarItensOnline();
     setHydrated(true);
-  }, []);
 
-  useEffect(() => {
-    if (!hydrated) return;
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(rooms));
-    } catch {}
-  }, [rooms, hydrated]);
+    const canal = supabase
+      .channel("enxoval-online")
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "enxoval_items",
+        },
+        () => {
+          carregarItensOnline();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(canal);
+    };
+  }, []);
 
   const totals = useMemo(() => {
     const all = rooms.flatMap((r) => r.items);
@@ -233,7 +301,13 @@ function Index() {
     filter === "todos" ? true : it.status === filter,
   );
 
-  const cycleStatus = (itemId: string) => {
+    const cycleStatus = async (itemId: string) => {
+    const itemAtual = current.items.find((item) => item.id === itemId);
+
+    if (!itemAtual) return;
+
+    const novoStatus = nextStatus(itemAtual.status);
+
     setRooms((prev) =>
       prev.map((r) =>
         r.id !== current.id
@@ -241,11 +315,25 @@ function Index() {
           : {
               ...r,
               items: r.items.map((it) =>
-                it.id === itemId ? { ...it, status: nextStatus(it.status) } : it,
+                it.id === itemId ? { ...it, status: novoStatus } : it
               ),
-            },
-      ),
+            }
+      )
     );
+
+    const { error } = await supabase
+      .from("enxoval_items")
+      .update({
+        status: novoStatus,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", itemId);
+
+    if (error) {
+      console.error("Erro ao atualizar status:", error);
+      alert("Não foi possível atualizar o status online.");
+      carregarItensOnline();
+    }
   };
 
   const startEdit = (it: Item) => {
@@ -254,10 +342,12 @@ function Index() {
     setEditNote(it.note ?? "");
   };
 
-  const saveEdit = () => {
+    const saveEdit = async () => {
     if (!editingId) return;
+
     const name = editName.trim();
     if (!name) return;
+
     setRooms((prev) =>
       prev.map((r) =>
         r.id !== current.id
@@ -265,38 +355,101 @@ function Index() {
           : {
               ...r,
               items: r.items.map((it) =>
-                it.id === editingId ? { ...it, name, note: editNote.trim() || undefined } : it,
+                it.id === editingId
+                  ? { ...it, name, note: editNote.trim() || undefined }
+                  : it
               ),
-            },
-      ),
+            }
+      )
     );
+
+    const { error } = await supabase
+      .from("enxoval_items")
+      .update({
+        name,
+        note: editNote.trim() || null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", editingId);
+
+    if (error) {
+      console.error("Erro ao editar item:", error);
+      alert("Não foi possível editar o item online.");
+      carregarItensOnline();
+      return;
+    }
+
     setEditingId(null);
   };
 
-  const deleteItem = (itemId: string) => {
+    const deleteItem = async (itemId: string) => {
+    const confirmar = confirm("Deseja realmente excluir este item?");
+
+    if (!confirmar) return;
+
     setRooms((prev) =>
       prev.map((r) =>
-        r.id !== current.id ? r : { ...r, items: r.items.filter((it) => it.id !== itemId) },
-      ),
+        r.id !== current.id
+          ? r
+          : { ...r, items: r.items.filter((it) => it.id !== itemId) }
+      )
     );
+
+    const { error } = await supabase
+      .from("enxoval_items")
+      .delete()
+      .eq("id", itemId);
+
+    if (error) {
+      console.error("Erro ao excluir item:", error);
+      alert("Não foi possível excluir o item online.");
+      carregarItensOnline();
+    }
+
     if (editingId === itemId) setEditingId(null);
   };
 
-  const addItem = (e: React.FormEvent) => {
+    const addItem = async (e: React.FormEvent) => {
     e.preventDefault();
+
     const name = newName.trim();
     if (!name) return;
-    const id = `${current.id}-${Date.now().toString(36)}`;
+
+    const novoItem = {
+      id: `${current.id}-${Date.now().toString(36)}`,
+      room_id: current.id,
+      name,
+      status: newStatus,
+      note: null,
+    };
+
     setRooms((prev) =>
       prev.map((r) =>
         r.id !== current.id
           ? r
           : {
               ...r,
-              items: [...r.items, { id, name, status: newStatus, note: newNote.trim() || undefined }],
-            },
-      ),
+              items: [
+                ...r.items,
+                {
+                  id: novoItem.id,
+                  name: novoItem.name,
+                  status: novoItem.status,
+                },
+              ],
+            }
+      )
     );
+
+    const { error } = await supabase.from("enxoval_items").insert(novoItem);
+
+    if (error) {
+      console.error("Erro ao adicionar item:", error);
+      alert("Não foi possível adicionar o item online.");
+      carregarItensOnline();
+      return;
+    }
+
     setNewName("");
     setNewNote("");
     setNewStatus("comprar");
